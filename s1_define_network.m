@@ -1,5 +1,5 @@
 % Make choice for 9 or 37
-net = 37;
+net = 9;
 
 if net == 9
 
@@ -133,4 +133,5 @@ regulator.YNMm=cell(1,1);
 
 % clearvars -except IEEE37
 %end
+
 
