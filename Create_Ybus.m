@@ -1,0 +1,268 @@
+function [Y,Ybus,Ybranch_array,Y_NS,Y_SS,N,ABI,MBI,PNLI,CNodes,CIndices,regulator] = ...
+          Create_Ybus(numBus,busNames,lineBuses1,lineBuses2,lineCodes,...
+                              lineStatuses,lineLengths,lineConfigs,...
+                              Zcfg,Ycfg,Ybase,Vbase,Sbase,epsilon,regulatorTypes,regulator)
+% Create Ytilde and Ybranch
+% Ybranch is simplified to be without Yshunt (for testing purposes)
+% Ytilde considers Yshunt and Ycaps
+
+busSet = 1:numBus;
+JbusSet = 1:3*(numBus);
+numBranch = length(lineBuses1);
+JBranchSet = 1:3*numBranch;
+phaseNodesLinIndices = reshape(JbusSet,3,numBus).';
+phaseNodes = repmat([1,2,3],numBus,1);
+N = numBus-1;
+
+% Create matrices to store values
+CNodes = sparse(zeros(numBranch,numBus));
+CIndices = sparse(zeros(numBranch*3, numBus*3));
+Ytilde = sparse(zeros(3*numBus));
+Ybranch = sparse(zeros(3*numBranch));
+
+% Sending/Recieving Nodes
+sNodes = getNumericNodeList(lineBuses1,busNames);
+rNodes = getNumericNodeList(lineBuses2,busNames);
+
+Ybranch_array = cell(length(lineBuses1),1);
+
+for ii = 1:length(lineBuses1)
+    jBranchIdx = (ii-1)*3+1:ii*3;
+    bus1 = lineBuses1(ii);
+    bus2 = lineBuses2(ii);
+    nIdx = find(strcmp(busNames,bus1));
+    mIdx = find(strcmp(busNames,bus2));
+    jmIdx = (mIdx-1)*3+1:mIdx*3;
+    jnIdx = (nIdx-1)*3+1:nIdx*3;
+    
+    CNodes(ii,nIdx)=1;
+    CNodes(ii,mIdx)=-1;
+    
+    Cmat=zeros(3);
+    
+    YtildeNMn=zeros(3,3);
+    YtildeNMm=zeros(3,3);
+    YtildeMNn=zeros(3,3);
+    YtildeMNm=zeros(3,3);
+    
+    % Based on the line status it will assign different Ytilde and Ybranch
+    % In IEEE37, reg1, subXFM, and Xfm-1 (lines 35, 36, 37)
+    switch lineStatuses{ii}
+        case 'reg1' % reg 1
+            tapAB=7;
+            tapBC=4;
+            
+            arAB= 1-0.00625*tapAB;
+            arBC=1-0.00625*tapBC;
+            
+            Av=[arAB, 1-arAB,0;
+                0, 1, 0 ;
+                0, 1-arBC,arBC];
+            Ai=[1/arAB, 0,0;
+                1-1/arAB,1,1-1/arBC;
+                0, 0, 1/arBC];
+
+            ztReg=(2.5/2)*3*0.01i;
+            Zregulator=[ztReg, 0, 0; 0 0 0; 0 0 ztReg];
+            
+            Zseries=Zcfg(:,:,lineCodes(ii)-720);
+            Yshunt=Ycfg(:,:,lineCodes(ii)-720);
+            availablePhases=find(any(Zseries));
+            
+            Zseries=Zseries(availablePhases,availablePhases);
+            Yshunt=Yshunt(availablePhases,availablePhases);
+            
+            % length of the line:
+            lineLength=lineLengths(ii);
+            
+            YtildeNMn(availablePhases,availablePhases)=( inv(Zseries*lineLength)/Ybase+0*Yshunt*lineLength/Ybase);
+            YtildeNMm(availablePhases,availablePhases)=(inv(Zseries*lineLength)/Ybase);
+            YtildeMNn(availablePhases,availablePhases)=(inv(Zseries*lineLength)/Ybase);
+            YtildeMNm(availablePhases,availablePhases)=(inv(Zseries*lineLength)/Ybase+0*Yshunt*lineLength/Ybase);
+            
+            FSVR=eye(3)+ YtildeNMn*inv(Av)*Zregulator*Ai;
+            % Ytilde
+            if strcmp(regulatorTypes,'ideal')
+                
+                Ytilde(jnIdx, jnIdx)= Ytilde(jnIdx, jnIdx)+Ai*(YtildeNMn)*inv(Av);
+                Ytilde(jnIdx, jmIdx)=-Ai*YtildeNMm;
+                Ytilde(jmIdx,jmIdx)=Ytilde(jmIdx,jmIdx)+YtildeMNm;
+                Ytilde(jmIdx,jnIdx)=-YtildeMNn*inv(Av);
+                
+            else
+                
+                Ytilde(jnIdx, jnIdx)= Ytilde(jnIdx, jnIdx)+Ai*inv(FSVR)*(YtildeNMn)*inv(Av);
+                Ytilde(jnIdx, jmIdx)=-Ai*inv(FSVR)*YtildeNMm;
+                Ytilde(jmIdx,jmIdx)=Ytilde(jmIdx,jmIdx)+YtildeMNm - YtildeMNm*inv(Av)*Zregulator*Ai*inv(FSVR)*YtildeNMm;
+                Ytilde(jmIdx,jnIdx)=-(YtildeMNn*inv(Av)-YtildeMNn*inv(Av)*Zregulator*Ai*inv(FSVR)*(YtildeNMn)*inv(Av));
+            end
+            regulator.VoltageGains{1}=Av;
+            regulator.CurrentGains{1}=Ai;
+            regulator.Impedances{1}=Zregulator;
+            regulator.YNMn{1}=Ai*inv(FSVR)*(YtildeNMn)*inv(Av);
+            regulator.YNMm{1}=Ai*inv(FSVR)*YtildeNMm;
+            
+            % Ybranch
+            YbranchII=zeros(3,3);
+            YbranchII(availablePhases,availablePhases)=(inv(Zseries*lineLength)/Ybase);
+            Ybranch(jBranchIdx,jBranchIdx)=YbranchII;
+            
+            Cmat=zeros(3);
+            Cmat(availablePhases,availablePhases)=eye(length(availablePhases));
+            CIndices( jBranchIdx, jnIdx) = Cmat;
+            CIndices( jBranchIdx, jmIdx) = -Cmat;
+            
+            % Store Y value
+            Ybranch_array{ii} = YbranchII;
+            
+        case 'subXFM'
+            
+            zt  =0.01*[2+8i]*3;
+            yt=1./zt;
+            Y2= (1/3) *[ 2*yt, -yt, -yt; -yt,2*yt,-yt; -yt,-yt,2*yt];
+            
+            Y3=(1/sqrt(3))*[-yt, yt, 0;
+                0, -yt, yt;
+                yt, 0, -yt];
+            
+            Y1=diag([yt;yt;yt]);
+            
+            Y2hat1=Y2+abs(yt)*epsilon*eye(3);
+            Y2hat2=Y2+abs(yt)*(epsilon/2)*eye(3);
+            
+            availablePhases=[1;2;3];
+            
+            YtildeNMn(availablePhases,availablePhases)=Y2hat1;
+            YtildeNMm(availablePhases,availablePhases)=Y2hat2;
+            YtildeMNn(availablePhases,availablePhases)=Y2hat2;
+            YtildeMNm(availablePhases,availablePhases)=Y2hat1;
+            
+            Ytilde(jnIdx, jnIdx)= Ytilde(jnIdx, jnIdx)+YtildeNMn;
+            Ytilde(jnIdx, jmIdx)=-YtildeNMm;
+            Ytilde(jmIdx,jmIdx)=Ytilde(jmIdx,jmIdx)+YtildeMNm;
+            Ytilde(jmIdx,jnIdx)=-YtildeMNn;
+            
+            % Ybranch
+            YbranchII=zeros(3,3);
+            YbranchII(availablePhases,availablePhases)=Y2;
+            Ybranch(jBranchIdx,jBranchIdx)=YbranchII;
+            
+            Cmat=zeros(3);
+            Cmat(availablePhases,availablePhases)=eye(length(availablePhases));
+            CIndices( jBranchIdx, jnIdx) = Cmat;
+            CIndices( jBranchIdx, jmIdx) = -Cmat;
+            
+            % Store Y value
+            Ybranch_array{ii} = YbranchII;
+            
+        case 'Xfm-1'
+            zt=0.01*[0.09+1.81i]*((480/Vbase).^2)*Sbase./(500000);
+            yt=1./zt;
+            Y2= (1/3) *[ 2*yt, -yt, -yt; -yt,2*yt,-yt; -yt,-yt,2*yt];
+            
+            %               Y2hat1=Y2+abs(yt)*epsilon*(100/3)*(1/5)*eye(3);
+            %                         Y2hat2=Y2+abs(yt)*(epsilon/2)*(100/3)*eye(3);
+            
+            Y2hat1=Y2+abs(yt)*epsilon*eye(3);
+            Y2hat2=Y2+abs(yt)*(epsilon/2);
+            
+            availablePhases=[1;2;3];
+            
+            % Ytilde
+            YtildeNMn(availablePhases,availablePhases)=Y2hat1;
+            YtildeNMm(availablePhases,availablePhases)=Y2hat2;
+            YtildeMNn(availablePhases,availablePhases)=Y2hat2;
+            YtildeMNm(availablePhases,availablePhases)=Y2hat1;
+            
+            Ytilde(jnIdx, jnIdx)= Ytilde(jnIdx, jnIdx)+YtildeNMn;
+            Ytilde(jnIdx, jmIdx)=-YtildeNMm;
+            Ytilde(jmIdx,jmIdx)=Ytilde(jmIdx,jmIdx)+YtildeMNm;
+            Ytilde(jmIdx,jnIdx)=-YtildeMNn;
+            
+            % Ybranch
+            YbranchII=zeros(3,3);
+            YbranchII(availablePhases,availablePhases)=Y2;
+            Ybranch(jBranchIdx,jBranchIdx)=YbranchII;
+            
+            Cmat=zeros(3);
+            Cmat(availablePhases,availablePhases)=eye(length(availablePhases));
+            CIndices( jBranchIdx, jnIdx) = Cmat;
+            CIndices( jBranchIdx, jmIdx) = -Cmat;
+            
+            % Store Y value
+            Ybranch_array{ii} = YbranchII;
+            
+        otherwise
+            
+            Zseries=Zcfg(:,:,lineConfigs(ii));
+            Yshunt=Ycfg(:,:,lineConfigs(ii));
+            availablePhases=find(any(Zseries));
+            
+            Zseries=Zseries(availablePhases,availablePhases);
+            Yshunt=Yshunt(availablePhases,availablePhases);
+            
+            % length of the line:
+            lineLength=lineLengths(ii);
+            
+            Yseries=inv(Zseries);
+            
+            % Ytilde
+            YtildeNMn(availablePhases,availablePhases)=(Yseries/lineLength/Ybase+0*Yshunt*lineLength/Ybase);
+            YtildeNMm(availablePhases,availablePhases)=(Yseries/lineLength/Ybase);
+            YtildeMNn(availablePhases,availablePhases)=(Yseries/lineLength/Ybase);
+            YtildeMNm(availablePhases,availablePhases)=(Yseries/lineLength/Ybase+0*Yshunt*lineLength/Ybase);
+            
+            Ytilde(jnIdx, jnIdx)= Ytilde(jnIdx, jnIdx)+YtildeNMn;
+            Ytilde(jnIdx, jmIdx)=-YtildeNMm;
+            Ytilde(jmIdx,jmIdx)=Ytilde(jmIdx,jmIdx)+YtildeMNm;
+            Ytilde(jmIdx,jnIdx)=-YtildeMNn;
+            
+            % Ybranch
+            YbranchII=zeros(3,3);
+            YbranchII(availablePhases,availablePhases)=(Yseries/lineLength/Ybase);
+            Ybranch(jBranchIdx,jBranchIdx)=YbranchII;
+            Cmat=zeros(3);
+            Cmat(availablePhases,availablePhases)=eye(length(availablePhases));
+            CIndices( jBranchIdx, jnIdx) = Cmat;
+            CIndices( jBranchIdx, jmIdx) = -Cmat;
+            
+            % Store Y value
+            Ybranch_array{ii} = YbranchII;
+    end
+end
+
+%% create a connected List of Nodes
+connectedPath = gen_path(numBus, CNodes.', sNodes, rNodes);
+connectedPath = [connectedPath,setdiff([1:numBus],connectedPath)];
+
+%% 6. Adding Ycap [no capacitors]
+Ycap=sparse(zeros(size(Ytilde)));
+
+%% Finding available phases
+availableBranchIndices=find(any(CIndices,2));
+missingBranchIndices=find(~any(CIndices,2));
+
+availableBusAppIndices=find(any(CIndices,1)).';
+missingBusAppIndices=find(~any(CIndices,1)).';
+
+availableBusIndices = find(any(Ytilde,2));
+missingBusIndices = find(~any(Ytilde,2));
+
+ABI = availableBusIndices;
+MBI = missingBusIndices;
+PNLI = phaseNodesLinIndices;
+
+% availableBusAppIndices and availableBusIndices should match
+
+YbusS=Ytilde( availableBusIndices, availableBusIndices);
+YcapS=Ycap(availableBusIndices, availableBusIndices);
+Ynet=YbusS+YcapS;
+Y=Ynet(1:end-3,1:end-3);
+Y_NS=Ynet(1:end-3,end-2:end);
+Y_SS=Ynet(end-2:end,end-2:end);
+Ybus=Y;  % the rank deficient admittance matrix
+
+
+
+
+end

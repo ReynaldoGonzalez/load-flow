@@ -1,0 +1,136 @@
+% Make choice for 9 or 37
+net = 37;
+
+if net == 9
+
+    regulatorTypes = 'non-ideal';
+    epsilon = 1e-6;
+
+    % Import lines info from CYME
+    s0_read_overhead_lines_report;
+
+    % Assign info from table
+    lineBuses1 = OverheadLinesReport.FromNode;
+    lineBuses2 = OverheadLinesReport.ToNode;
+    LineLengths = OverheadLinesReport.Lengthft;
+    LineCodes = string(OverheadLinesReport.LineId);
+
+    %remove extra config wording from cyme
+    LineCodes = char(LineCodes);
+    LineCodes = LineCodes(:,8:10);
+    LineCodes = str2num(LineCodes);
+    
+    % Setting up the list of nodes, giving them a unique order from 1:N, setting the substation to node N+1
+    lineBuses1=cellstr((lineBuses1));
+    lineBuses2=cellstr((lineBuses2));
+    lineStatuses=repmat({''},length(lineBuses1),1);
+
+    lineStatuses=[lineStatuses; {'subXFM'}];
+    LineLengths=[LineLengths;0];
+
+    % Base voltages: (defined in Source Information Report)
+    Sbase=100e6; % from the substation transformer
+    Vbase=4160/sqrt(3); % line to neutral conversion (secondary of the substation transformer)
+    Zbase=(Vbase^2)/Sbase;
+    Ybase=1./Zbase;
+    Ibase = Vbase/Zbase;
+    
+    % Config 601 from CYME
+    Zcfg(:,:,1) = [	0.3019+1.0130i	0.1366+0.4001i	0.1366+0.4001i; ...
+                    0.1366+0.4001i	0.3097+0.9795i	0.1366+0.4001i	; ...
+                    0.1366+0.4001i	0.1366+0.4001i	0.3052+0.9983i	; ]/5280;
+
+    Ycfg(:,:,1) = 1j*(10^(-6)) * [   5.961   -1.332   -1.332
+                                    -1.332    6.302   -1.332
+                                    -1.332   -1.332    5.641] /5280;
+                                
+    ZcfgIndex = [601];
+                                
+    load('loadsDummy.mat')
+    loadsIn = loadsDummy;
+    numLines = 8;
+    
+elseif net == 37
+    
+    regulatorTypes = 'non-ideal';
+    epsilon = 1e-6;
+    
+    datapath=[pwd,'/IEEE-37 feeder data'];
+    [lineBuses1,lineBuses2,lineLengths,lineCodes] = importlines([datapath,'/Line Data.xls']);
+    
+    % Setting up the list of nodes, giving them a unique order from 1:N, setting the substation to node N+1
+    lineBuses1=cellstr(num2str(lineBuses1));
+    lineBuses2=cellstr(num2str(lineBuses2));
+    lineStatuses=repmat({''},length(lineBuses1),1);
+    
+    % Xfm-1 transformer configuration
+    XfmIdx=find(isnan(lineCodes));
+    lineCodes(XfmIdx,1)=2; % transformer is type 2
+    lineStatuses{XfmIdx,1}='Xfm-1';
+
+    % Regulator configuration
+    regIdx=find(strcmp(lineBuses1,'799'));
+    lineStatuses{regIdx,1}='reg1';
+
+    % Substation transformer configuration
+    lineBuses1=[lineBuses1;'000'];
+    lineBuses2=[lineBuses2; '799'];
+    LineCodes=[lineCodes;2];
+    lineStatuses=[lineStatuses; {'subXFM'}];
+    LineLengths=[lineLengths;0];
+    
+    % Base voltages:
+    Sbase=2500000; % from the substation transformer
+    Vbase=4800/sqrt(3); % line to neutral conversion (secondary of the substation transformer)
+    Zbase=(Vbase^2)/Sbase;
+    Ybase=1./Zbase;
+    Ibase = Vbase/Zbase;
+    
+    get_impedances
+
+    loadsIn = importloads_v2([datapath,'/Spot Loads']); % dummy load
+    loadsDummy = loadsIn;
+    numLines = 34;
+    
+end
+
+
+%% 3.  Organizing bus names
+busNames = unique([lineBuses1;lineBuses2]);
+numBus = length(busNames);
+numBranch = length(lineBuses1);
+
+% convert Line codes to line configs
+% line configs has number for config index or 0 for non-line element
+
+lineConfigs = zeros(numBranch,1);
+for i = 1:numBranch
+    if LineCodes(i) ~= 2 % should change to 0 later
+        cfgindex = find(ZcfgIndex==LineCodes(i));
+        lineConfigs(i) = cfgindex;
+    end
+end
+
+
+%% Putting substation index at the very end:
+
+substation='000';
+substationIndex=find(strcmp(busNames,substation));
+
+if substationIndex< length(busNames) % if substation is not the end bus
+    busNames=[busNames(1:substationIndex-1); busNames(substationIndex+1:end); ...
+              busNames(substationIndex)];
+end
+
+busIDs = str2double(busNames);
+
+% busNamesWithRegs=[busNames;'799r'];
+regulator.VoltageGains=cell(1,1);
+regulator.CurrentGains=cell(1,1);
+regulator.Impedances=cell(1,1);
+regulator.YNMn=cell(1,1);
+regulator.YNMm=cell(1,1);
+
+% clearvars -except IEEE37
+%end
+
